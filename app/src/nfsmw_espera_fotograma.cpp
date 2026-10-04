@@ -385,7 +385,8 @@ REX_HOOK_RAW(sub_826E8EE8) {
  * the game's loop checks the conditions again.
  */
 constexpr uint32_t kRetornoOrdenes = 0x82441DC4;
-REX_EXTERN(__imp__sub_823C83F8);
+// The executor itself, in nfsmw_cola_render.cpp: the original loop with acquire/release ordering.
+void NfsmwColaRenderConsumir(PPCContext& ctx, uint8_t* base);
 REX_HOOK_RAW(sub_823C83F8) {
   static const bool activo = REXCVAR_GET(nfsmw_ejecutor_sin_vueltas);
   if (activo && uint32_t(ctx.lr) == kRetornoOrdenes && ctx.r4.u32 == 0) {
@@ -412,7 +413,7 @@ REX_HOOK_RAW(sub_823C83F8) {
       nfsmw::esperas::Sumar(nfsmw::esperas::kEjecutorSinOrdenes, ns_sin_ordenes);
     }
   }
-  __imp__sub_823C83F8(ctx, base);
+  NfsmwColaRenderConsumir(ctx, base);
 }
 
 // Right after the flag is set to 1 (sub_82442058).

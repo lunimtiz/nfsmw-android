@@ -69,6 +69,9 @@ set(NFSMW_SOURCES
     # Frame handoff between the game's two threads without a Sleep(0) loop
     # (cvar nfsmw_espera_fotograma_bloqueante).
     src/nfsmw_espera_fotograma.cpp
+    # The render command queue of the game's two threads with acquire/release ordering (cvar
+    # nfsmw_cola_render_ordenada): without it ARM64 can run a command whose function is still 0.
+    src/nfsmw_cola_render.cpp
     # Dump of the changed registers of the game's D3D (sub_825A2AA0) in native code: one copy instead of
     # ~15-20 instructions per word, bit-identical (cvar nfsmw_d3d_registros_nativo).
     src/nfsmw_d3d_registros_nativo.cpp
