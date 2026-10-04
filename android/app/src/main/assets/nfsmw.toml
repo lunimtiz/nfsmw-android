@@ -9,7 +9,7 @@
 
 # The code only turns these on for the Switch (REX_PLATFORM_SWITCH); a phone needs them just as much.
 nfsmw_render_sin_mosaico = true      # draw the scene once: no 3-strip tiling, no MSAA
-nfsmw_cubemap_caras_siempre = 4      # the rear-view mirror face of the car cubemap, every frame
+nfsmw_cubemap_caras_siempre = 0      # the rear-view mirror face of the car cubemap, every frame
 
 # 1280x720 is what the Switch draws in handheld mode (30 FPS there). A recent phone GPU can take
 # "1920x1080": change it here or in the settings menu (it needs a restart).
