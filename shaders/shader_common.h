@@ -74,43 +74,35 @@
 
 #ifdef __spirv__
 
-struct PushConstants
-{
-    uint64_t VertexShaderConstants;
-    uint64_t PixelShaderConstants;
-    uint64_t SharedConstants;
-};
-
-[[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
-
-// NFSMW: the same blocks of the upload buffer, also as dynamic UBOs in set 4. With
-// -fvk-use-dx-layout each float4 takes 16 contiguous bytes, so any 4-byte word of the shared block is
-// a component: v[B / 16][(B % 16) / 4], and asuint reads it without changing a bit.
+// Constants are dynamic UBOs in set 3, bindings 1-3 (binding 0 is the sampler heap). Mali-G68
+// only allows 4 bound descriptor sets, so there is no set 4. A 64-bit pointer needs shaderInt64,
+// which it also does not have. With -fvk-use-dx-layout each float4 takes 16 contiguous bytes:
+// v[B / 16][(B % 16) / 4].
 struct NfsmwBloqueVs { float4 v[256]; };
 struct NfsmwBloquePs { float4 v[224]; };
 struct NfsmwBloqueCompartidas { float4 v[23]; };
-[[vk::binding(0, 4)]] ConstantBuffer<NfsmwBloqueVs> g_UboVertex;
-[[vk::binding(1, 4)]] ConstantBuffer<NfsmwBloquePs> g_UboPixel;
-[[vk::binding(2, 4)]] ConstantBuffer<NfsmwBloqueCompartidas> g_UboCompartidas;
-#define NFSMW_UBO ((g_SpecConstants & SPEC_CONSTANT_CONSTANTES_UBO) != 0)
+[[vk::binding(1, 3)]] ConstantBuffer<NfsmwBloqueVs> g_UboVertex;
+[[vk::binding(2, 3)]] ConstantBuffer<NfsmwBloquePs> g_UboPixel;
+[[vk::binding(3, 3)]] ConstantBuffer<NfsmwBloqueCompartidas> g_UboCompartidas;
+#define NFSMW_UBO 1
 #define NFSMW_COMPARTIDA_UINT(B)  asuint(g_UboCompartidas.v[(B) / 16][((B) % 16) / 4])
 #define NFSMW_COMPARTIDA_FLOAT(B) g_UboCompartidas.v[(B) / 16][((B) % 16) / 4]
 
-#define g_Booleans                 (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(256) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256))
-#define g_SwappedTexcoords         (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(260) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260))
-#define g_HalfPixelOffset          (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT(264), NFSMW_COMPARTIDA_FLOAT(268)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264))
-#define g_AlphaThreshold           (NFSMW_UBO ? NFSMW_COMPARTIDA_FLOAT(272) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272))
+#define g_Booleans                 NFSMW_COMPARTIDA_UINT(256)
+#define g_SwappedTexcoords         NFSMW_COMPARTIDA_UINT(260)
+#define g_HalfPixelOffset          float2(NFSMW_COMPARTIDA_FLOAT(264), NFSMW_COMPARTIDA_FLOAT(268))
+#define g_AlphaThreshold           NFSMW_COMPARTIDA_FLOAT(272)
 // NFSMW: alpha test function (RB_COLORCONTROL.alpha_func): 0 never, 1 <, 2 ==, 3 <=,
 // 4 >, 5 !=, 6 >=, 7 always.
-#define g_AlphaFunction            (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(276) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276))
+#define g_AlphaFunction            NFSMW_COMPARTIDA_UINT(276)
 // NFSMW: position to host clip space, like ndc_scale/ndc_offset in the
 // emulation (graphics/util/draw.cpp). (1, 1) and (0, 0) for normal draws;
 // with Xenos clipping disabled it converts from pixels to NDC.
-#define g_NdcScale                 (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT(280), NFSMW_COMPARTIDA_FLOAT(284)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 280))
-#define g_NdcOffset                (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT(288), NFSMW_COMPARTIDA_FLOAT(292)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 288))
+#define g_NdcScale                 float2(NFSMW_COMPARTIDA_FLOAT(280), NFSMW_COMPARTIDA_FLOAT(284))
+#define g_NdcOffset                float2(NFSMW_COMPARTIDA_FLOAT(288), NFSMW_COMPARTIDA_FLOAT(292))
 // NFSMW: where each component of the vertex input at that location comes from
 // (D3D patches the fetch swizzle according to the declaration). 0xFFF = as is.
-#define g_InputRemap(LOC)          (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(296 + (LOC) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 296 + (LOC) * 4))
+#define g_InputRemap(LOC)          NFSMW_COMPARTIDA_UINT(296 + (LOC) * 4)
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 

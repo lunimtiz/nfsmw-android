@@ -2172,7 +2172,6 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     const auto& propiedades = dispositivo_->properties();
     const std::pair<bool, const char*> requisitos[] = {
         {propiedades.independentBlend, "independentBlend"},
-        {propiedades.shaderInt64, "shaderInt64"},
         {propiedades.bufferDeviceAddress, "bufferDeviceAddress"},
         {propiedades.runtimeDescriptorArray, "runtimeDescriptorArray"},
         {propiedades.shaderSampledImageArrayDynamicIndexing,
@@ -2210,14 +2209,25 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                     i + 1, i < 3 ? "RGBA8" : i == 3 ? "R8" : "RG8");
       }
     }
-    direccion_bufer_ = reinterpret_cast<FnDireccionBufer>(
-        dispositivo_->vulkan_instance()->functions().vkGetDeviceProcAddr(device_,
-                                                                          "vkGetBufferDeviceAddress"));
-    copiar_imagen_ = reinterpret_cast<FnCopiarImagen>(
-        dispositivo_->vulkan_instance()->functions().vkGetDeviceProcAddr(device_, "vkCmdCopyImage"));
+    const auto pedir = dispositivo_->vulkan_instance()->functions().vkGetDeviceProcAddr;
+    // Vulkan 1.2 promotes this to the core name. On 1.1 (Mali-G68) only the KHR entry point exists.
+    direccion_bufer_ = reinterpret_cast<FnDireccionBufer>(pedir(device_, "vkGetBufferDeviceAddress"));
+    if (!direccion_bufer_) {
+      direccion_bufer_ = reinterpret_cast<FnDireccionBufer>(pedir(device_, "vkGetBufferDeviceAddressKHR"));
+    }
+    copiar_imagen_ = reinterpret_cast<FnCopiarImagen>(pedir(device_, "vkCmdCopyImage"));
     CargarCachePipelines();
     CargarEstadoDinamico();  // dynamic state phases 1 and 2
-    if (!direccion_bufer_ || !CrearSubida() || !CrearDescriptores()) {
+    if (!direccion_bufer_) {
+      REXLOG_ERROR("[nativo] C6: el driver no da vkGetBufferDeviceAddress");
+      return false;
+    }
+    if (!CrearSubida()) {
+      REXLOG_ERROR("[nativo] C6: no se pudo crear el bufer de subida");
+      return false;
+    }
+    if (!CrearDescriptores()) {
+      REXLOG_ERROR("[nativo] C6: no se pudieron crear los descriptores");
       return false;
     }
     // The pool is created after CrearDescriptores (where texturas_mb_max_ is read) and before CrearVacias,
@@ -3553,7 +3563,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       clave_enlazada_valida_ = false;  // the counter does not classify this bind
     }
     if (!sets_enlazados_) {
-      NFSMW_SUB(1, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, 4,
+      NFSMW_SUB(1, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, 3,
                                                 sets_.data(), 0, nullptr));
       sets_enlazados_ = true;
     }
@@ -3600,7 +3610,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                           (offsets_ubo[1] != offsets_ubo_enlazados_[1] ? 2u : 0u) |
                           (offsets_ubo[2] != offsets_ubo_enlazados_[2] ? 4u : 0u)];
         }
-        NFSMW_SUB(2, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 4, 1,
+        NFSMW_SUB(2, dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 3, 1,
                                                   &sets_ubo_[ranura_actual_], 3, offsets_ubo.data()));
         offsets_ubo_enlazados_ = offsets_ubo;
         ranura_ubo_enlazada_ = ranura_actual_;
@@ -3863,7 +3873,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     eds_valido_ = false;  // the next draw sets all of its own again
     clave_enlazada_valida_ = false;  // The sky does not keep its key (ContarCambioPipeline)
     if (!sets_enlazados_) {
-      dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, 4,
+      dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 0, 3,
                                    sets_.data(), 0, nullptr);
       sets_enlazados_ = true;
     }
@@ -3872,7 +3882,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                               sizeof(c.push), c.push);
     }
-    dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 4, 1,
+    dfn_.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout_pipeline_, 3, 1,
                                  &sets_ubo_[c.ranura_ubo], 3, c.offsets_ubo.data());
     dfn_.vkCmdSetViewport(cmd, 0, 1, &c.viewport);
     dfn_.vkCmdSetScissor(cmd, 0, 1, &c.tijera);
@@ -7997,7 +8007,9 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     const VkDescriptorBindingFlags banderas_enlace =
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
         VK_DESCRIPTOR_BINDING_UPDATE_UNUSED_WHILE_PENDING_BIT;
-    for (uint32_t i = 0; i < 4; ++i) {
+    // Sets 0-2 are the image heaps. Set 3 is the samplers plus the dynamic UBOs: Mali-G68 reports
+    // maxBoundDescriptorSets = 4, and a fifth set makes vkCreatePipelineLayout hang.
+    for (uint32_t i = 0; i < 3; ++i) {
       VkDescriptorSetLayoutBinding enlace{};
       enlace.binding = 0;
       enlace.descriptorType = kTipos[i];
@@ -8018,24 +8030,24 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
       montones_[i].capacidad = kCapacidadMonton[i];
     }
-    const VkDescriptorPoolSize tamanos[2] = {
+    const VkDescriptorPoolSize tamanos[1] = {
         {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
-         kCapacidadMonton[0] + kCapacidadMonton[1] + kCapacidadMonton[2]},
-        {VK_DESCRIPTOR_TYPE_SAMPLER, kCapacidadMonton[3]}};
+         kCapacidadMonton[0] + kCapacidadMonton[1] + kCapacidadMonton[2]}};
     VkDescriptorPoolCreateInfo info_pool{};
     info_pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     info_pool.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
-    info_pool.maxSets = 4;
-    info_pool.poolSizeCount = 2;
+    info_pool.maxSets = 3;
+    info_pool.poolSizeCount = 1;
     info_pool.pPoolSizes = tamanos;
     if (dfn_.vkCreateDescriptorPool(device_, &info_pool, nullptr, &pool_) != VK_SUCCESS) {
       return false;
     }
+    const VkDescriptorSetLayout layouts_imagen[3] = {layouts_[0], layouts_[1], layouts_[2]};
     VkDescriptorSetAllocateInfo reserva{};
     reserva.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     reserva.descriptorPool = pool_;
-    reserva.descriptorSetCount = 4;
-    reserva.pSetLayouts = layouts_.data();
+    reserva.descriptorSetCount = 3;
+    reserva.pSetLayouts = layouts_imagen;
     if (dfn_.vkAllocateDescriptorSets(device_, &reserva, sets_.data()) != VK_SUCCESS) {
       return false;
     }
@@ -8067,31 +8079,48 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     REXLOG_INFO("[nativo] C6: constantes por UBO dinamico (nfsmw_nativo_constantes_ubo) = {}; alternar cada {} s; "
                 "alineacion {} bytes",
                 usar_ubo_ ? "SI" : "no", alternar_ubo_s_, alineacion_ubo_);
-    std::array<VkDescriptorSetLayoutBinding, 3> enlaces_ubo{};
-    for (uint32_t b = 0; b < 3; ++b) {
+    REXLOG_INFO("[nativo] C6: creando el layout UBO");
+    // Binding 0 stays the sampler heap. Bindings 1-3 are the dynamic UBOs (one set, four bindings).
+    std::array<VkDescriptorSetLayoutBinding, 4> enlaces_ubo{};
+    enlaces_ubo[0].binding = 0;
+    enlaces_ubo[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    enlaces_ubo[0].descriptorCount = kCapacidadMonton[3];
+    enlaces_ubo[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    for (uint32_t b = 1; b < 4; ++b) {
       enlaces_ubo[b].binding = b;
       enlaces_ubo[b].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
       enlaces_ubo[b].descriptorCount = 1;
       enlaces_ubo[b].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     }
+    const VkDescriptorBindingFlags banderas_set3[4] = {banderas_enlace, 0, 0, 0};
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flags_set3{};
+    flags_set3.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    flags_set3.bindingCount = 4;
+    flags_set3.pBindingFlags = banderas_set3;
     VkDescriptorSetLayoutCreateInfo info_ubo{};
     info_ubo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    info_ubo.bindingCount = 3;
+    info_ubo.pNext = &flags_set3;
+    info_ubo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+    info_ubo.bindingCount = 4;
     info_ubo.pBindings = enlaces_ubo.data();
-    if (dfn_.vkCreateDescriptorSetLayout(device_, &info_ubo, nullptr, &layout_ubo_) != VK_SUCCESS) {
+    if (dfn_.vkCreateDescriptorSetLayout(device_, &info_ubo, nullptr, &layouts_[3]) != VK_SUCCESS) {
       return false;
     }
-    const VkDescriptorPoolSize tamano_ubo{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 * uint32_t(sets_ubo_.size())};
+    montones_[3].capacidad = kCapacidadMonton[3];
+    const VkDescriptorPoolSize tamanos_ubo[2] = {
+        {VK_DESCRIPTOR_TYPE_SAMPLER, kCapacidadMonton[3] * uint32_t(sets_ubo_.size())},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 3 * uint32_t(sets_ubo_.size())}};
     VkDescriptorPoolCreateInfo info_pool_ubo{};
     info_pool_ubo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    info_pool_ubo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
     info_pool_ubo.maxSets = uint32_t(sets_ubo_.size());
-    info_pool_ubo.poolSizeCount = 1;
-    info_pool_ubo.pPoolSizes = &tamano_ubo;
+    info_pool_ubo.poolSizeCount = 2;
+    info_pool_ubo.pPoolSizes = tamanos_ubo;
     if (dfn_.vkCreateDescriptorPool(device_, &info_pool_ubo, nullptr, &pool_ubo_) != VK_SUCCESS) {
       return false;
     }
     std::array<VkDescriptorSetLayout, kRanurasDeTrabajo> layouts_ubo;
-    layouts_ubo.fill(layout_ubo_);
+    layouts_ubo.fill(layouts_[3]);
     VkDescriptorSetAllocateInfo reserva_ubo{};
     reserva_ubo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     reserva_ubo.descriptorPool = pool_ubo_;
@@ -8100,6 +8129,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     if (dfn_.vkAllocateDescriptorSets(device_, &reserva_ubo, sets_ubo_.data()) != VK_SUCCESS) {
       return false;
     }
+    REXLOG_INFO("[nativo] C6: escribiendo los UBO");
     for (size_t ranura = 0; ranura < sets_ubo_.size(); ++ranura) {
       const VkDescriptorBufferInfo bloques[3] = {{subidas_[ranura].bufer, 0, kUboBytesVs},
                                                  {subidas_[ranura].bufer, 0, kUboBytesPs},
@@ -8110,7 +8140,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       for (uint32_t b = 0; b < 3; ++b) {
         escrituras_ubo[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         escrituras_ubo[b].dstSet = sets_ubo_[ranura];
-        escrituras_ubo[b].dstBinding = b;
+        escrituras_ubo[b].dstBinding = b + 1;
         escrituras_ubo[b].descriptorCount = 1;
         escrituras_ubo[b].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         escrituras_ubo[b].pBufferInfo = &bloques[b];
@@ -8121,14 +8151,16 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                                     24};
     VkPipelineLayoutCreateInfo info_layout{};
     info_layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    const std::array<VkDescriptorSetLayout, 5> layouts_pipeline = {layouts_[0], layouts_[1], layouts_[2],
-                                                                    layouts_[3], layout_ubo_};
-    info_layout.setLayoutCount = 5;
+    const std::array<VkDescriptorSetLayout, 4> layouts_pipeline = {layouts_[0], layouts_[1], layouts_[2],
+                                                                    layouts_[3]};
+    info_layout.setLayoutCount = 4;
     info_layout.pSetLayouts = layouts_pipeline.data();
     info_layout.pushConstantRangeCount = 1;
     info_layout.pPushConstantRanges = &rango;
-    return dfn_.vkCreatePipelineLayout(device_, &info_layout, nullptr, &layout_pipeline_) ==
-           VK_SUCCESS;
+    REXLOG_INFO("[nativo] C6: creando el layout de pipeline");
+    const VkResult layout = dfn_.vkCreatePipelineLayout(device_, &info_layout, nullptr, &layout_pipeline_);
+    REXLOG_INFO("[nativo] C6: layout de pipeline {}", layout == VK_SUCCESS ? "listo" : "rechazado");
+    return layout == VK_SUCCESS;
   }
 
   // Slot 0 of each heap: a transparent black texture and a basic sampler, as the emulation does for an
@@ -8241,13 +8273,15 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     imagen.sampler = sampler;
     VkWriteDescriptorSet escritura{};
     escritura.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    escritura.dstSet = sets_[3];
     escritura.dstBinding = 0;
     escritura.dstArrayElement = ranura;
     escritura.descriptorCount = 1;
     escritura.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     escritura.pImageInfo = &imagen;
-    dfn_.vkUpdateDescriptorSets(device_, 1, &escritura, 0, nullptr);
+    for (VkDescriptorSet set : sets_ubo_) {
+      escritura.dstSet = set;
+      dfn_.vkUpdateDescriptorSets(device_, 1, &escritura, 0, nullptr);
+    }
   }
 
   uint32_t ReservarRanura(uint32_t monton) {

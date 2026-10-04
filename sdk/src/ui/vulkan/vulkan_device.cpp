@@ -195,10 +195,24 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     // #238.
     XE_UI_VULKAN_STRUCT_EXTENSION(EXT_memory_budget)
   }
+  bool ext_KHR_buffer_device_address = false;
+  bool ext_EXT_descriptor_indexing = false;
+  bool ext_EXT_scalar_block_layout = false;
+  bool ext_KHR_uniform_buffer_standard_layout = false;
+  bool ext_KHR_sampler_mirror_clamp_to_edge_native = false;
   if (get_physical_device_properties2_supported && REXCVAR_GET(vulkan_native_shader_features)) {
     // #456. NFSMW native renderer: dynamic blending and color write masks. Its three features are
     // enabled further down, only if the device provides them.
     XE_UI_VULKAN_STRUCT_EXTENSION(EXT_extended_dynamic_state3)
+    // Mali-G68 reports Vulkan 1.1 and exposes the native renderer's 1.2 features as extensions.
+    if (properties.apiVersion < VK_MAKE_API_VERSION(0, 1, 2, 0)) {
+      XE_UI_VULKAN_LOCAL_EXTENSION(KHR_buffer_device_address)
+      XE_UI_VULKAN_LOCAL_EXTENSION(EXT_descriptor_indexing)
+      XE_UI_VULKAN_LOCAL_EXTENSION(EXT_scalar_block_layout)
+      XE_UI_VULKAN_LOCAL_EXTENSION(KHR_uniform_buffer_standard_layout)
+      requested_extensions.emplace("VK_KHR_sampler_mirror_clamp_to_edge",
+                                   &ext_KHR_sampler_mirror_clamp_to_edge_native);
+    }
   }
   if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
     // #414.
@@ -348,6 +362,19 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   VulkanFeatures<VkPhysicalDeviceExtendedDynamicState3FeaturesEXT,
                  VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT>
       features_EXT_extended_dynamic_state3;
+  // Vulkan 1.1 devices expose these as extensions instead of VkPhysicalDeviceVulkan12Features.
+  VulkanFeatures<VkPhysicalDeviceBufferDeviceAddressFeatures,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES>
+      features_buffer_device_address;
+  VulkanFeatures<VkPhysicalDeviceDescriptorIndexingFeatures,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES>
+      features_descriptor_indexing;
+  VulkanFeatures<VkPhysicalDeviceScalarBlockLayoutFeatures,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES>
+      features_scalar_block_layout;
+  VulkanFeatures<VkPhysicalDeviceUniformBufferStandardLayoutFeatures,
+                 VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES>
+      features_uniform_buffer_standard_layout;
 
   if (get_physical_device_properties2_supported) {
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 2, 0)) {
@@ -391,6 +418,18 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     }
     if (device->extensions_.ext_EXT_extended_dynamic_state3) {
       features_EXT_extended_dynamic_state3.Link(supported_features_2, device_create_info);
+    }
+    if (ext_KHR_buffer_device_address) {
+      features_buffer_device_address.Link(supported_features_2, device_create_info);
+    }
+    if (ext_EXT_descriptor_indexing) {
+      features_descriptor_indexing.Link(supported_features_2, device_create_info);
+    }
+    if (ext_EXT_scalar_block_layout) {
+      features_scalar_block_layout.Link(supported_features_2, device_create_info);
+    }
+    if (ext_KHR_uniform_buffer_standard_layout) {
+      features_uniform_buffer_standard_layout.Link(supported_features_2, device_create_info);
     }
     ifn.vkGetPhysicalDeviceProperties2(physical_device, &properties_2);
     ifn.vkGetPhysicalDeviceFeatures2(physical_device, &supported_features_2);
@@ -645,7 +684,11 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
   // Native rendering needs these optional raster/sampler/query features too,
   // but must not inherit the mandatory Xenos stores/atomics checks above.
   if (with_gpu_emulation || REXCVAR_GET(vulkan_native_shader_features)) {
-    XE_UI_VULKAN_FEATURE(robustBufferAccess)
+    // Always on, except for the native renderer on Arm GPUs (vendor 0x13B5): it never needed it there, and
+    // robust buffer access makes Mali bounds-check every uniform and vertex fetch.
+    if (with_gpu_emulation || properties.vendorID != 0x13B5) {
+      XE_UI_VULKAN_FEATURE(robustBufferAccess)
+    }
     XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
     XE_UI_VULKAN_FEATURE(independentBlend)
     XE_UI_VULKAN_FEATURE(geometryShader)
@@ -687,6 +730,31 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
         XE_UI_VULKAN_FEATURE(samplerAnisotropy)
         XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
       }
+    }
+  } else if (REXCVAR_GET(vulkan_native_shader_features)) {
+    // Same features as the 1.2 path, read from the extension structs above.
+    XE_UI_VULKAN_FEATURE(shaderSampledImageArrayDynamicIndexing)
+    XE_UI_VULKAN_FEATURE(independentBlend)
+    XE_UI_VULKAN_FEATURE(samplerAnisotropy)
+    XE_UI_VULKAN_FEATURE(fullDrawIndexUint32)
+    if (ext_KHR_sampler_mirror_clamp_to_edge_native) {
+      XE_UI_VULKAN_FEATURE_IMPLIED(samplerMirrorClampToEdge)
+    }
+    if (ext_KHR_uniform_buffer_standard_layout) {
+      XE_UI_VULKAN_FEATURE_2(features_uniform_buffer_standard_layout, uniformBufferStandardLayout);
+    }
+    if (ext_EXT_scalar_block_layout) {
+      XE_UI_VULKAN_FEATURE_2(features_scalar_block_layout, scalarBlockLayout);
+    }
+    if (ext_KHR_buffer_device_address) {
+      XE_UI_VULKAN_FEATURE_2(features_buffer_device_address, bufferDeviceAddress);
+    }
+    if (ext_EXT_descriptor_indexing) {
+      XE_UI_VULKAN_FEATURE_2(features_descriptor_indexing, runtimeDescriptorArray);
+      XE_UI_VULKAN_FEATURE_2(features_descriptor_indexing, descriptorBindingPartiallyBound);
+      XE_UI_VULKAN_FEATURE_2(features_descriptor_indexing,
+                             descriptorBindingSampledImageUpdateAfterBind);
+      XE_UI_VULKAN_FEATURE_2(features_descriptor_indexing, descriptorBindingUpdateUnusedWhilePending);
     }
   } else {
     if (ext_1_2_KHR_sampler_mirror_clamp_to_edge) {

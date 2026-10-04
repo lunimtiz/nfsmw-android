@@ -65,43 +65,35 @@
 
 #ifdef __spirv__
 
-struct PushConstants
-{
-    uint64_t VertexShaderConstants;
-    uint64_t PixelShaderConstants;
-    uint64_t SharedConstants;
-};
-
-[[vk::push_constant]] ConstantBuffer<PushConstants> g_PushConstants;
-
-// NFSMW (16/09): los mismos bloques del bufer de subida, tambien como UBO dinamicos del conjunto 4.
-// Con -fvk-use-dx-layout cada float4 ocupa 16 bytes contiguos, asi que cualquier palabra de 4 bytes del
-// bloque compartido es un componente: v[B / 16][(B % 16) / 4], y asuint la lee sin tocar un bit.
+// Constantes por UBO dinamico en el conjunto 3, enlaces 1-3 (el 0 es el monton de samplers).
+// La Mali-G68 solo admite 4 conjuntos enlazados, asi que no cabe un conjunto 4. Un puntero de
+// 64 bits exige shaderInt64, que tampoco tiene. Con -fvk-use-dx-layout cada float4 ocupa
+// 16 bytes contiguos: v[B / 16][(B % 16) / 4].
 struct NfsmwBloqueVs { float4 v[256]; };
 struct NfsmwBloquePs { float4 v[224]; };
 struct NfsmwBloqueCompartidas { float4 v[23]; };
-[[vk::binding(0, 4)]] ConstantBuffer<NfsmwBloqueVs> g_UboVertex;
-[[vk::binding(1, 4)]] ConstantBuffer<NfsmwBloquePs> g_UboPixel;
-[[vk::binding(2, 4)]] ConstantBuffer<NfsmwBloqueCompartidas> g_UboCompartidas;
-#define NFSMW_UBO ((g_SpecConstants & SPEC_CONSTANT_CONSTANTES_UBO) != 0)
+[[vk::binding(1, 3)]] ConstantBuffer<NfsmwBloqueVs> g_UboVertex;
+[[vk::binding(2, 3)]] ConstantBuffer<NfsmwBloquePs> g_UboPixel;
+[[vk::binding(3, 3)]] ConstantBuffer<NfsmwBloqueCompartidas> g_UboCompartidas;
+#define NFSMW_UBO 1
 #define NFSMW_COMPARTIDA_UINT(B)  asuint(g_UboCompartidas.v[(B) / 16][((B) % 16) / 4])
 #define NFSMW_COMPARTIDA_FLOAT(B) g_UboCompartidas.v[(B) / 16][((B) % 16) / 4]
 
-#define g_Booleans                 (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(256) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 256))
-#define g_SwappedTexcoords         (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(260) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 260))
-#define g_HalfPixelOffset          (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT(264), NFSMW_COMPARTIDA_FLOAT(268)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 264))
-#define g_AlphaThreshold           (NFSMW_UBO ? NFSMW_COMPARTIDA_FLOAT(272) : vk::RawBufferLoad<float>(g_PushConstants.SharedConstants + 272))
+#define g_Booleans                 NFSMW_COMPARTIDA_UINT(256)
+#define g_SwappedTexcoords         NFSMW_COMPARTIDA_UINT(260)
+#define g_HalfPixelOffset          float2(NFSMW_COMPARTIDA_FLOAT(264), NFSMW_COMPARTIDA_FLOAT(268))
+#define g_AlphaThreshold           NFSMW_COMPARTIDA_FLOAT(272)
 // NFSMW: funcion de la prueba de alfa (RB_COLORCONTROL.alpha_func): 0 nunca, 1 <, 2 ==, 3 <=,
 // 4 >, 5 !=, 6 >=, 7 siempre.
-#define g_AlphaFunction            (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(276) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 276))
+#define g_AlphaFunction            NFSMW_COMPARTIDA_UINT(276)
 // NFSMW: posicion al espacio de recorte del host, como ndc_scale/ndc_offset de
 // la emulacion (graphics/util/draw.cpp). (1, 1) y (0, 0) en los dibujos normales;
 // con el recorte del Xenos desactivado pasa de pixeles a NDC.
-#define g_NdcScale                 (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT(280), NFSMW_COMPARTIDA_FLOAT(284)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 280))
-#define g_NdcOffset                (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT(288), NFSMW_COMPARTIDA_FLOAT(292)) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + 288))
+#define g_NdcScale                 float2(NFSMW_COMPARTIDA_FLOAT(280), NFSMW_COMPARTIDA_FLOAT(284))
+#define g_NdcOffset                float2(NFSMW_COMPARTIDA_FLOAT(288), NFSMW_COMPARTIDA_FLOAT(292))
 // NFSMW: de donde sale cada componente de la entrada de vertices de esa ubicacion
 // (el D3D parchea el swizzle del fetch segun la declaracion). 0xFFF = tal cual.
-#define g_InputRemap(LOC)          (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT(296 + (LOC) * 4) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + 296 + (LOC) * 4))
+#define g_InputRemap(LOC)          NFSMW_COMPARTIDA_UINT(296 + (LOC) * 4)
 
 [[vk::constant_id(0)]] const uint g_SpecConstants = 0;
 

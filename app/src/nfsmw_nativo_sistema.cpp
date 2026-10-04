@@ -718,6 +718,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
     if (!provider_) {
       // Steps C5c-C6: the XenosRecomp SPIR-V needs capabilities that the VkDevice only
       // enables if they are requested before it is created.
+      // The first argument is the Xbox 360 GPU emulation feature set. It requires
+      // vertexPipelineStoresAndAtomics, which Mali-G68 does not expose. The native
+      // renderer does not use that path; vulkan_native_shader_features is enough.
       rex::cvar::SetFlagByName("vulkan_native_shader_features", "true");
 #if REX_PLATFORM_ANDROID
       // Native shaders read their own buffers. They do not use Xenos memory

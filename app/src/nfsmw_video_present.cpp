@@ -22,7 +22,7 @@ extern "C" bool RexNativeVideoPresent(const rex::ui::vulkan::VulkanDevice* dispo
   auto f=std::move(g_fotograma);
   try {
     const auto& p=dispositivo->properties();
-    if (!p.shaderInt64 || !p.shaderSampledImageArrayDynamicIndexing || !p.bufferDeviceAddress ||
+    if (!p.shaderSampledImageArrayDynamicIndexing || !p.bufferDeviceAddress ||
         !p.runtimeDescriptorArray || !p.scalarBlockLayout) {
       nfsmw::native::DesactivarVideo("faltan capacidades Vulkan habilitadas"); return false;
     }

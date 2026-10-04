@@ -28,6 +28,76 @@ function count(text, needle) {
   return n;
 }
 
+// The shipped translator still emits `NFSMW_UBO ? ubo : vk::RawBufferLoad(g_PushConstants...)`.
+// Mali-G68 has no shaderInt64, so the pointer side must not reach DXC.
+function dropPointerLoads(text) {
+  const needle = '(NFSMW_UBO ? ';
+  let out = '';
+  let i = 0;
+  while (i < text.length) {
+    const at = text.indexOf(needle, i);
+    if (at < 0) {
+      out += text.slice(i);
+      break;
+    }
+    out += text.slice(i, at);
+    const start = at + needle.length;
+    let depth = 0;
+    let colon = -1;
+    for (let p = start; p < text.length; p++) {
+      const c = text[p];
+      if (c === '(') {
+        depth++;
+      } else if (c === ')') {
+        if (depth === 0) {
+          break;
+        }
+        depth--;
+      } else if (depth === 0 && text.startsWith(' : vk::RawBufferLoad', p)) {
+        colon = p;
+        break;
+      }
+    }
+    if (colon < 0) {
+      throw new Error('puntero de 64 bits con una forma que no se pudo quitar');
+    }
+    let r = colon + ' : vk::RawBufferLoad'.length;
+    if (text[r] !== '<') {
+      throw new Error('RawBufferLoad sin tipo');
+    }
+    let brackets = 0;
+    do {
+      if (text[r] === '<') {
+        brackets++;
+      } else if (text[r] === '>') {
+        brackets--;
+      }
+      r++;
+    } while (brackets > 0 && r < text.length);
+    if (text[r] !== '(') {
+      throw new Error('RawBufferLoad sin argumentos');
+    }
+    let parens = 0;
+    do {
+      if (text[r] === '(') {
+        parens++;
+      } else if (text[r] === ')') {
+        parens--;
+      }
+      r++;
+    } while (parens > 0 && r < text.length);
+    if (text[r] !== ')') {
+      throw new Error('ternario de puntero sin cerrar');
+    }
+    out += text.slice(start, colon);
+    i = r + 1;
+  }
+  if (out.includes('g_PushConstants') || out.includes('uint64_t') || out.includes('RawBufferLoad')) {
+    throw new Error('el shader todavía usa punteros de 64 bits');
+  }
+  return out;
+}
+
 function hasShadowMarker(spirv) {
   if (spirv.length < 20) {
     return false;
@@ -67,7 +137,7 @@ export async function buildShaderLibrary(containers, modules, shaderCommon, log 
   const sources = new Map();
   for (const c of containers) {
     const stem = c.name.slice(0, -4);
-    sources.set(stem, utf8.decode(hlsl.FS.readFile(`/out/${stem}.hlsl`)));
+    sources.set(stem, dropPointerLoads(utf8.decode(hlsl.FS.readFile(`/out/${stem}.hlsl`))));
   }
   log(t('translatedShaders', { count: sources.size }));
 

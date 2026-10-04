@@ -1213,15 +1213,14 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
             {
                 uint32_t tailCount = (isPixelShader ? 224 : 256) - constantInfo->registerIndex;
 
-                // NFSMW: dynamic UBO or pointer, depending on SPEC_CONSTANT_CONSTANTES_UBO.
-                println("#define {}(INDEX) select((INDEX) < {}, (NFSMW_UBO ? g_Ubo{}.v[{} + min(INDEX, {})] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + ({} + min(INDEX, {})) * 16, 0x10)), 0.0)",
-                    constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1,
-                    shaderName, constantInfo->registerIndex.get(), tailCount - 1);
+                // Dynamic UBO only. A 64-bit pointer needs shaderInt64, which Mali-G68 does not expose.
+                println("#define {}(INDEX) select((INDEX) < {}, g_Ubo{}.v[{} + min(INDEX, {})], 0.0)",
+                    constantName, tailCount, shaderName, constantInfo->registerIndex.get(), tailCount - 1);
             }
             else
             {
-                println("#define {} (NFSMW_UBO ? g_Ubo{}.v[{}] : vk::RawBufferLoad<float4>(g_PushConstants.{}ShaderConstants + {}, 0x10))",
-                    constantName, shaderName, constantInfo->registerIndex.get(), shaderName, constantInfo->registerIndex * 16);
+                println("#define {} g_Ubo{}.v[{}]",
+                    constantName, shaderName, constantInfo->registerIndex.get());
             }
             
             for (uint16_t j = 0; j < constantInfo->registerCount; j++)
@@ -1234,19 +1233,19 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
         {
             for (size_t j = 0; j < std::size(TEXTURE_DIMENSIONS); j++)
             {
-                println("#define {}_Texture{}DescriptorIndex (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
-                    constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4, j * 64 + constantInfo->registerIndex * 4);
+                println("#define {}_Texture{}DescriptorIndex NFSMW_COMPARTIDA_UINT({})",
+                    constantName, TEXTURE_DIMENSIONS[j], j * 64 + constantInfo->registerIndex * 4);
             }
 
-            println("#define {}_SamplerDescriptorIndex (NFSMW_UBO ? NFSMW_COMPARTIDA_UINT({}) : vk::RawBufferLoad<uint>(g_PushConstants.SharedConstants + {}))",
-                constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
+            println("#define {}_SamplerDescriptorIndex NFSMW_COMPARTIDA_UINT({})",
+                constantName, std::size(TEXTURE_DIMENSIONS) * 64 + constantInfo->registerIndex * 4);
 
             // 1/size of the host image of that slot, which the renderer writes at byte
             // 360 + slot * 8 of the shared constants (right after g_InputRemap).
             {
                 const uint32_t invBase = 360 + constantInfo->registerIndex * 8;
-                println("#define {}_InvTamano (NFSMW_UBO ? float2(NFSMW_COMPARTIDA_FLOAT({}), NFSMW_COMPARTIDA_FLOAT({})) : vk::RawBufferLoad<float2>(g_PushConstants.SharedConstants + {}))",
-                    constantName, invBase, invBase + 4, invBase);
+                println("#define {}_InvTamano float2(NFSMW_COMPARTIDA_FLOAT({}), NFSMW_COMPARTIDA_FLOAT({}))",
+                    constantName, invBase, invBase + 4);
             }
 
             samplers.emplace(constantInfo->registerIndex, constantName);
@@ -1258,7 +1257,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += "\n#else\n\n";
 
-    println("cbuffer {}ShaderConstants : register(b{}, space4)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 1 : 0);
+    println("cbuffer {}ShaderConstants : register(b{}, space3)", isPixelShader ? "Pixel" : "Vertex", isPixelShader ? 2 : 1);
     out += "{\n";
 
     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
@@ -1287,7 +1286,7 @@ void ShaderRecompiler::recompile(const uint8_t* shaderData, const std::string_vi
 
     out += "};\n\n";
 
-    out += "cbuffer SharedConstants : register(b2, space4)\n";
+    out += "cbuffer SharedConstants : register(b3, space3)\n";
     out += "{\n";
 
     for (uint32_t i = 0; i < constantTableContainer->constantTable.constants; i++)
