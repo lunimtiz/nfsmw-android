@@ -1,6 +1,7 @@
 #include <jni.h>
 #include <vulkan/vulkan.h>
 
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -50,28 +51,58 @@ std::string Probe() {
   VkPhysicalDeviceFeatures features{};
   vkGetPhysicalDeviceProperties(gpu, &props);
   vkGetPhysicalDeviceFeatures(gpu, &features);
+  // Vulkan 1.2 devices report these through VkPhysicalDeviceVulkan12Features. Vulkan 1.1 devices (Mali-G68)
+  // report the same features through their extensions, which the native renderer also supports.
+  uint32_t extension_count = 0;
+  vkEnumerateDeviceExtensionProperties(gpu, nullptr, &extension_count, nullptr);
+  std::vector<VkExtensionProperties> extensions(extension_count);
+  if (extension_count) vkEnumerateDeviceExtensionProperties(gpu, nullptr, &extension_count, extensions.data());
+  auto has_extension = [&](const char* name) {
+    for (const auto& e : extensions) if (!std::strcmp(e.extensionName, name)) return true;
+    return false;
+  };
+  const bool has_bda_extension = has_extension("VK_KHR_buffer_device_address");
+  const bool has_indexing_extension = has_extension("VK_EXT_descriptor_indexing");
   VkPhysicalDeviceVulkan12Features v12{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+  VkPhysicalDeviceBufferDeviceAddressFeatures bda{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+  VkPhysicalDeviceDescriptorIndexingFeatures indexing{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
   VkPhysicalDeviceFeatures2 fs{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-  if (props.apiVersion >= VK_API_VERSION_1_2) {
-    fs.pNext = &v12;
+  if (props.apiVersion >= VK_API_VERSION_1_1) {
+    void** tail = &fs.pNext;
+    if (props.apiVersion >= VK_API_VERSION_1_2) {
+      *tail = &v12;
+    } else {
+      if (has_bda_extension) { *tail = &bda; tail = &bda.pNext; }
+      if (has_indexing_extension) { *tail = &indexing; tail = &indexing.pNext; }
+    }
     auto query = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
         vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceFeatures2"));
     if (query) query(gpu, &fs);
   }
+  const bool api12 = props.apiVersion >= VK_API_VERSION_1_2;
+  const bool buffer_device_address = api12 ? v12.bufferDeviceAddress : bda.bufferDeviceAddress;
+  const bool runtime_descriptor_array = api12 ? v12.runtimeDescriptorArray : indexing.runtimeDescriptorArray;
+  const bool partially_bound = api12 ? v12.descriptorBindingPartiallyBound
+                                     : indexing.descriptorBindingPartiallyBound;
+  const bool update_after_bind = api12 ? v12.descriptorBindingSampledImageUpdateAfterBind
+                                       : indexing.descriptorBindingSampledImageUpdateAfterBind;
+  const bool update_unused = api12 ? v12.descriptorBindingUpdateUnusedWhilePending
+                                   : indexing.descriptorBindingUpdateUnusedWhilePending;
   std::vector<std::string> missing;
   auto require = [&](bool supported, const char* name) {
     if (!supported) missing.emplace_back(name);
   };
-  // The SDK currently enables the native shader interface through Vulkan 1.2.
-  require(props.apiVersion >= VK_API_VERSION_1_2, "Vulkan 1.2 o posterior");
+  // The native shaders read their constants from dynamic UBOs (no 64-bit pointers, so no shaderInt64) and use
+  // four descriptor sets: three image heaps and one with the samplers and the UBOs.
+  require(props.apiVersion >= VK_API_VERSION_1_1, "Vulkan 1.1 o posterior");
+  require(props.limits.maxBoundDescriptorSets >= 4, "4 descriptor sets enlazados");
   require(features.independentBlend, "independentBlend");
-  require(features.shaderInt64, "shaderInt64");
   require(features.shaderSampledImageArrayDynamicIndexing, "shaderSampledImageArrayDynamicIndexing");
-  require(v12.bufferDeviceAddress, "bufferDeviceAddress (interfaz Vulkan 1.2)");
-  require(v12.runtimeDescriptorArray, "runtimeDescriptorArray");
-  require(v12.descriptorBindingPartiallyBound, "descriptorBindingPartiallyBound");
-  require(v12.descriptorBindingSampledImageUpdateAfterBind, "descriptorBindingSampledImageUpdateAfterBind");
-  require(v12.descriptorBindingUpdateUnusedWhilePending, "descriptorBindingUpdateUnusedWhilePending");
+  require(buffer_device_address, api12 ? "bufferDeviceAddress" : "bufferDeviceAddress (VK_KHR_buffer_device_address)");
+  require(runtime_descriptor_array, "runtimeDescriptorArray");
+  require(partially_bound, "descriptorBindingPartiallyBound");
+  require(update_after_bind, "descriptorBindingSampledImageUpdateAfterBind");
+  require(update_unused, "descriptorBindingUpdateUnusedWhilePending");
   std::ostringstream formats;
   std::ostringstream conversions;
   conversions << '[';
