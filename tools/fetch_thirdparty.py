@@ -87,10 +87,18 @@ def main():
                     with open(src, encoding='utf-8') as link_file:
                         link_target = link_file.read().strip()
                     resolved_target = os.path.normpath(os.path.join(dirpath, link_target))
+                    if os.path.isdir(resolved_target):
+                        if not os.path.exists(dst):
+                            shutil.copytree(resolved_target, dst)
+                            copied += 1
+                        else:
+                            kept += 1
+                        continue
                     if not os.path.isfile(resolved_target):
-                        raise FileNotFoundError(
-                            f'Could not resolve vendored symlink {relative_path}: {link_target}'
-                        )
+                        # MoltenVK demos link to Vulkan-Tools, which is not in this
+                        # checkout. Windows stores that symlink as a text file.
+                        print(f'skipping symlink outside this checkout: {relative_path} -> {link_target}')
+                        continue
                 if os.path.exists(dst) and resolved_target is None:
                     kept += 1
                     continue

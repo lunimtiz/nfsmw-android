@@ -2,15 +2,28 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = $PSScriptRoot
 $wrapper = Join-Path $repoRoot 'android\gradlew.bat'
 
-if (-not $env:JAVA_HOME) {
-    $studioJbr = Join-Path $env:ProgramFiles 'Android\Android Studio\jbr'
-    if (Test-Path -LiteralPath (Join-Path $studioJbr 'bin\java.exe')) {
-        $env:JAVA_HOME = $studioJbr
+function Test-JdkHome([string] $jdkPath) {
+    return [bool]($jdkPath -and (Test-Path -LiteralPath (Join-Path $jdkPath 'bin\java.exe')))
+}
+
+# Only this process. The user/system JAVA_HOME is left unchanged.
+$jdkHome = $null
+if (Test-JdkHome $env:JAVA_HOME) {
+    $jdkHome = $env:JAVA_HOME
+} elseif ($env:JAVA_HOME -match '[\\/]bin$' -and (Test-JdkHome (Split-Path $env:JAVA_HOME -Parent))) {
+    $jdkHome = Split-Path $env:JAVA_HOME -Parent
+} else {
+    foreach ($candidate in @(
+        (Join-Path $env:ProgramFiles 'Android\Android Studio\jbr')
+    )) {
+        if (Test-JdkHome $candidate) { $jdkHome = $candidate; break }
     }
 }
-if (-not (Get-Command java -ErrorAction SilentlyContinue)) {
+if (-not $jdkHome) {
     throw 'Java 17 or newer is required. Install a JDK and ensure java is on PATH.'
 }
+$env:JAVA_HOME = $jdkHome
+Write-Host "JAVA_HOME (esta compilacion): $env:JAVA_HOME"
 if (-not (Test-Path -LiteralPath $wrapper)) {
     throw 'Gradle wrapper is missing from android\gradlew.bat.'
 }
