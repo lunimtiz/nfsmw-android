@@ -27,6 +27,10 @@ inline constexpr VkPipelineStageFlags kEtapasPase =
 inline constexpr VkAccessFlags kAccesosPase =
     kAccesosImagenes & ~(VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
 
+// Arm GPUs (Mali) are tile-based: a render pass opened with loadOp = DONT_CARE really discards the previous
+// contents. Set together with the synchronization mode, once, from the vendor id.
+inline std::atomic<bool> g_gpu_por_mosaicos{false};
+inline bool GpuPorMosaicos() { return g_gpu_por_mosaicos.load(std::memory_order_relaxed); }
 // nfsmw_nativo_sincronizacion_total: every dependency is made as wide as Vulkan allows (all stages, all
 // memory accesses) and every transfer command is followed by a full barrier. It tells a missing dependency
 // from any other cause of wrong image content, and on Mali it is what makes the reflections stable.
@@ -39,6 +43,7 @@ inline void ConfigurarSincronizacionTotal(uint32_t vendor_id) {
   static std::once_flag una_vez;
   std::call_once(una_vez, [vendor_id] {
     const int32_t modo = REXCVAR_GET(nfsmw_nativo_sincronizacion_total);
+    g_gpu_por_mosaicos.store(vendor_id == 0x13B5, std::memory_order_relaxed);
     g_sincronizacion_total.store(modo == 1 || (modo < 0 && vendor_id == 0x13B5), std::memory_order_relaxed);
   });
 }

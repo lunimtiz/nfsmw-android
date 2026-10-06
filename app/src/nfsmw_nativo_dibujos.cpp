@@ -2224,6 +2224,10 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     }
     if (nfsmw::nativo::SincronizacionTotal() && copiar_imagen_) {  // see nfsmw_nativo_sincronizacion.h
       nfsmw::nativo::g_barrera_fn = dfn_.vkCmdPipelineBarrier;
+      if (nfsmw::nativo::GpuPorMosaicos() && REXCVAR_GET(nfsmw_nativo_pase_sombras_sin_load)) {
+        REXLOG_INFO("[compatibilidad] GPU por mosaicos: el pase del mapa de sombras carga su contenido (LOAD) en vez "
+                    "de ignorarlo (DONT_CARE)");
+      }
       nfsmw::nativo::g_copiar_real = copiar_imagen_;
       copiar_imagen_ = &nfsmw::nativo::CopiarYBarrera;
     }
@@ -10148,8 +10152,10 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     // longer tells them apart: the scene fell into the shadow bucket and vanished from its own category.
     categoria_pase_ = CategoriaDeDestino(pitch, claves);
     contexto_->MarcarGpu(categoria_pase_);
-    const bool sombras_sin_load =
-        es_sombras && REXCVAR_GET(nfsmw_nativo_pase_sombras_sin_load);
+    // Not on tile-based GPUs (Mali): there DONT_CARE discards the map's previous contents, including the
+    // game's clear, so the map held garbage and every receiver (cars above all) came out in shadow.
+    const bool sombras_sin_load = es_sombras && REXCVAR_GET(nfsmw_nativo_pase_sombras_sin_load) &&
+                                  !nfsmw::nativo::GpuPorMosaicos();
     const VkRenderPass pase = PaseDe(formatos, sombras_sin_load ? kCargaIgnorar : kCargaLeer);
     if (pase == VK_NULL_HANDLE) {
       return Rechazar(42, "no se pudo crear el render pass");
