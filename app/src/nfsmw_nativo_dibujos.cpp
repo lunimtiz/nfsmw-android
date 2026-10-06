@@ -30,6 +30,7 @@
 //   equivalent.
 
 #include "nfsmw_nativo_dibujos.h"
+#include "nfsmw_diagnostico.h"
 #include "nfsmw_esperas_tiron.h"
 
 #include "nfsmw_nativo_vertices_dedupe.h"
@@ -1112,6 +1113,8 @@ inline uint32_t CategoriaDeDestino(uint32_t pitch, const uint64_t* claves) {
 namespace gr = rex::graphics;
 namespace xenos = rex::graphics::xenos;
 using rex::ui::vulkan::VulkanDevice;
+// Diagnostic lines: to the wide diagnostic file when that mode is on, to the log otherwise.
+#define NFSMW_DIAG(...) ::nfsmw::diag::Escribir(fmt::format(__VA_ARGS__))
 
 constexpr uint32_t kRegConstantesVs = 0x4000;
 constexpr uint32_t kRegConstantesPs = 0x4400;
@@ -2221,13 +2224,13 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       dispositivo_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(dispositivo_->physical_device(),
                                                                                   &fisico_sync);
       nfsmw::nativo::ConfigurarSincronizacionTotal(fisico_sync.vendorID);
-    }
-    if (nfsmw::nativo::SincronizacionTotal() && copiar_imagen_) {  // see nfsmw_nativo_sincronizacion.h
-      nfsmw::nativo::g_barrera_fn = dfn_.vkCmdPipelineBarrier;
       if (nfsmw::nativo::GpuPorMosaicos() && REXCVAR_GET(nfsmw_nativo_pase_sombras_sin_load)) {
         REXLOG_INFO("[compatibilidad] GPU por mosaicos: el pase del mapa de sombras carga su contenido (LOAD) en vez "
                     "de ignorarlo (DONT_CARE)");
       }
+    }
+    if (nfsmw::nativo::SincronizacionTotal() && copiar_imagen_) {  // see nfsmw_nativo_sincronizacion.h
+      nfsmw::nativo::g_barrera_fn = dfn_.vkCmdPipelineBarrier;
       nfsmw::nativo::g_copiar_real = copiar_imagen_;
       copiar_imagen_ = &nfsmw::nativo::CopiarYBarrera;
     }
@@ -8831,13 +8834,14 @@ class DibujosVulkanImpl final : public DibujosVulkan {
           AnotarMemoriaDeLaGpu();
         }
       }
-      if (texturas_.size() <= 48) {
-        REXLOG_INFO("[nativo] C3: textura {:08X} {}x{} formato {} {} orden {} pitch {} "
-                    "swizzle {:03X} signos {:02X}{}; niveles {} (mips en {:08X}, empaquetados desde {})",
-                    base, ancho, alto, formato, ((f[0] >> 31) & 0x1) ? "en mosaico" : "lineal",
-                    (f[1] >> 6) & 0x3, ((f[0] >> 22) & 0x1FF) << 5, swizzle, (f[0] >> 2) & 0xFF,
-                    cubo ? " (cubo)" : volumen ? " (3D)" : "", niveles, dir_mips,
-                    nivel_empaquetado == UINT32_MAX ? std::string("ninguno") : std::to_string(nivel_empaquetado));
+      if (texturas_.size() <= 48 || nfsmw::diag::Activo()) {  // every texture in the wide diagnostic mode
+        NFSMW_DIAG("[nativo] C3: textura {:08X} {}x{} formato {} {} orden {} pitch {} "
+                   "swizzle {:03X} signos {:02X}{}; niveles {} (mips en {:08X}, empaquetados desde {}, bc_cpu {})",
+                   base, ancho, alto, formato, ((f[0] >> 31) & 0x1) ? "en mosaico" : "lineal",
+                   (f[1] >> 6) & 0x3, ((f[0] >> 22) & 0x1FF) << 5, swizzle, (f[0] >> 2) & 0xFF,
+                   cubo ? " (cubo)" : volumen ? " (3D)" : "", niveles, dir_mips,
+                   nivel_empaquetado == UINT32_MAX ? std::string("ninguno") : std::to_string(nivel_empaquetado),
+                   bc_cpu);
       }
     }
     ranura = RanuraVista(textura.imagen.imagen, formato_host, swizzle, tf.swizzle_host, monton);
@@ -9185,6 +9189,19 @@ class DibujosVulkanImpl final : public DibujosVulkan {
     } else {
       OrdenDeSiempre(datos, tf.unidad_orden, orden);
     }
+    if (volumen && tf.bytes == 4 && nfsmw::diag::Activo()) {
+      uint64_t suma[4] = {};
+      const size_t texels = datos.size() / 4;
+      for (size_t i = 0; i < texels; ++i) {
+        for (uint32_t c = 0; c < 4; ++c) suma[c] += datos[i * 4 + c];
+      }
+      NFSMW_DIAG("[nativo] C3 volumen {:08X} {}x{}x{} {} orden {}: medias por byte {:.1f}/{:.1f}/{:.1f}/{:.1f}; "
+                 "primeros texels {:02X}{:02X}{:02X}{:02X} {:02X}{:02X}{:02X}{:02X}",
+                 base, ancho, alto, fondo, mosaico ? "mosaico" : "lineal", uint32_t(orden),
+                 double(suma[0]) / double(texels), double(suma[1]) / double(texels),
+                 double(suma[2]) / double(texels), double(suma[3]) / double(texels), datos[0], datos[1], datos[2],
+                 datos[3], datos[4], datos[5], datos[6], datos[7]);
+    }
     if (diag_mips_ && textura.niveles > 1 && leer_base && !volumen) {
       RevisarMips(base, formato, ancho, alto, tf, textura, bytes_capa_nivel, datos);
     }
@@ -9220,6 +9237,23 @@ class DibujosVulkanImpl final : public DibujosVulkan {
         return;
       }
       datos.swap(temporal_bc_);
+    }
+    if (nfsmw::diag::Activo()) {  // content of the base level, to tell dark or empty textures apart
+      const uint32_t canales_host = bc_cpu ? nfsmw::bc::Canales(formato_bc) : tf.bloque == 1 ? tf.bytes : 0;
+      const size_t texels = size_t(textura.imagen.ancho) * textura.imagen.alto;
+      const size_t desde = bc_cpu ? textura.desplazamiento_nivel[0] : 0;
+      if ((canales_host == 4 || canales_host == 1) && datos.size() >= desde + texels * canales_host) {
+        const size_t paso = std::max<size_t>(1, texels / 65536);
+        uint64_t suma[4] = {};
+        size_t n = 0;
+        for (size_t i = 0; i < texels; i += paso, ++n) {
+          for (uint32_t c = 0; c < canales_host; ++c) suma[c] += datos[desde + i * canales_host + c];
+        }
+        NFSMW_DIAG("[nativo] C3 contenido {:08X} {}x{} formato {}{}: medias por byte {:.1f}/{:.1f}/{:.1f}/{:.1f}",
+                   base, textura.imagen.ancho, textura.imagen.alto, formato, bc_cpu ? " (BC por CPU)" : "",
+                   double(suma[0]) / double(n), double(suma[1]) / double(n), double(suma[2]) / double(n),
+                   double(suma[3]) / double(n));
+      }
     }
     textura.huella = huella;
     textura.datos.swap(datos);

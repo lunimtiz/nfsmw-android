@@ -31,6 +31,7 @@
 
 #include "nfsmw_nativo_sistema.h"
 
+#include "nfsmw_diagnostico.h"
 #include "nfsmw_esperas_tiron.h"
 #include "nfsmw_nativo_destinos.h"
 #include "nfsmw_nativo_ganchos.h"
@@ -421,6 +422,8 @@ namespace {
 namespace xenos = rex::graphics::xenos;
 using rex::X_STATUS;  // X_STATUS_SUCCESS and X_STATUS_UNSUCCESSFUL need it too
 using Reloj = std::chrono::steady_clock;
+// Frame trace lines: to the wide diagnostic file when that mode is on, to the log otherwise.
+#define NFSMW_TRAZA(...) ::nfsmw::diag::Escribir(fmt::format(__VA_ARGS__))
 using ContextoSalida = rex::ui::vulkan::VulkanPresenter::VulkanGuestOutputRefreshContext;
 
 std::atomic<uint64_t> g_swaps_nativos{0};  // SwapsNativos(), for the watchdog
@@ -2394,7 +2397,18 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
     if (trazando_) {
       trazando_ = false;
       traza_hecha_ = true;
-      REXLOG_INFO("[traza] fin del fotograma: {} lineas", trazas_);
+      NFSMW_TRAZA("[traza] fin del fotograma: {} lineas", trazas_);
+      return;
+    }
+    // Wide diagnostic mode (DIAG button): one whole frame every kTrazaCada Swaps, with no line limit.
+    if (nfsmw::diag::Activo()) {
+      if (swaps_.load() % kTrazaCada == 0) {
+        trazando_ = true;
+        trazas_ = 0;
+        constantes_traza_validas_ = false;
+        NFSMW_TRAZA("[traza] fotograma completo tras el Swap {} (t {} ms)", swaps_.load(),
+                    std::chrono::duration_cast<std::chrono::milliseconds>(Reloj::now() - inicio_sistema_).count());
+      }
       return;
     }
     const int32_t segundos = REXCVAR_GET(nfsmw_nativo_diag_fotograma_s);
@@ -2402,14 +2416,53 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
         Reloj::now() - inicio_sistema_ >= std::chrono::seconds(segundos)) {
       trazando_ = true;
       trazas_ = 0;
-      REXLOG_INFO("[traza] fotograma completo tras el Swap {}", swaps_.load());
+      constantes_traza_validas_ = false;
+      NFSMW_TRAZA("[traza] fotograma completo tras el Swap {}", swaps_.load());
+    }
+  }
+
+  // Shader constants (256 vec4 for the VS from 0x4000 and 256 for the PS from 0x4400) that differ from the last
+  // traced draw: all the non-zero ones on the first draw of a traced frame, then only the changes.
+  void TrazarConstantes() {
+    std::string cambios;
+    uint32_t n = 0;
+    for (uint32_t k = 0; k < 512; ++k) {
+      uint32_t actual[4];
+      for (uint32_t c = 0; c < 4; ++c) actual[c] = Registro(0x4000 + k * 4 + c);
+      uint32_t* anterior = constantes_traza_[k];
+      const bool distinto = std::memcmp(actual, anterior, sizeof(actual)) != 0;
+      const bool vacio = !(actual[0] | actual[1] | actual[2] | actual[3]);
+      if (constantes_traza_validas_ ? !distinto : vacio) {
+        continue;
+      }
+      std::memcpy(anterior, actual, sizeof(actual));
+      cambios += fmt::format(" {}c{}=(", k < 256 ? "V" : "P", k & 255);
+      for (uint32_t c = 0; c < 4; ++c) {
+        float f;
+        std::memcpy(&f, &actual[c], sizeof(f));
+        cambios += fmt::format("{}{:.4g}", c ? "," : "", f);
+      }
+      cambios += ")";
+      ++n;
+    }
+    if (!constantes_traza_validas_) {
+      // After the first dump the unchanged zero vec4s must stay zero in the copy.
+      for (uint32_t k = 0; k < 512; ++k) {
+        bool vacio = true;
+        for (uint32_t c = 0; c < 4; ++c) vacio = vacio && Registro(0x4000 + k * 4 + c) == 0;
+        if (vacio) std::memset(constantes_traza_[k], 0, sizeof(constantes_traza_[k]));
+      }
+      constantes_traza_validas_ = true;
+    }
+    if (n) {
+      NFSMW_TRAZA("[traza]   constantes ({}):{}", n, cambios);
     }
   }
 
   // One line per draw: shaders, render targets, state and the textures of the PS samplers
   // (address / format / dimension; ! if the fetch constant is not a texture).
   void TrazarDibujo() {
-    if (!trazando_ || trazas_ >= 4000) {
+    if (!trazando_ || trazas_ >= nfsmw::diag::TrazaMax()) {
       return;
     }
     ++trazas_;
@@ -2425,9 +2478,17 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
         const uint32_t d1 = Registro(base + 1);
         const uint32_t d3 = Registro(base + 3);
         const uint32_t d5 = Registro(base + 5);
-        texturas += fmt::format(" t{}={:08X}/f{}/d{}/s{:03X}/e{}{}", s.registro, d1 & 0xFFFFF000,
-                                d1 & 0x3F, (d5 >> 9) & 0x3, (d3 >> 1) & 0xFFF, (d1 >> 6) & 0x3,
-                                (d0 & 0x3) == 2 ? "" : "!");
+        const uint32_t d2 = Registro(base + 2);
+        const uint32_t d4 = Registro(base + 4);
+        const uint32_t dim = (d5 >> 9) & 0x3;
+        const uint32_t ancho = dim == 2 ? (d2 & 0x7FF) + 1 : (d2 & 0x1FFF) + 1;
+        const uint32_t alto = dim == 2 ? ((d2 >> 11) & 0x7FF) + 1 : ((d2 >> 13) & 0x1FFF) + 1;
+        const std::string tamano = dim == 2 ? fmt::format("{}x{}x{}", ancho, alto, ((d2 >> 22) & 0x3FF) + 1)
+                                            : fmt::format("{}x{}", ancho, alto);
+        texturas += fmt::format(" t{}={:08X}/f{}/d{}/{}/mip{}-{}{}/s{:03X}/e{}{}{}", s.registro, d1 & 0xFFFFF000,
+                                d1 & 0x3F, dim, tamano, (d4 >> 2) & 0xF, (d4 >> 6) & 0xF,
+                                (d5 >> 12) & 0x1FFFF ? "+" : "", (d3 >> 1) & 0xFFF, (d1 >> 6) & 0x3,
+                                (d0 & 0x3) == 2 ? "" : "!", (d0 >> 31) & 1 ? "/T" : "/L");
       }
     }
     if (!vs_dibujo_ || !ps_dibujo_) {
@@ -2449,7 +2510,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       }
     }
     const uint32_t iniciador = Registro(g::XE_GPU_REG_VGT_DRAW_INITIATOR);
-    REXLOG_INFO("[traza] dibujo VS n{} PS n{} tipo {} cuenta {} sup {:08X} rt0 {:08X} rt1 {:08X} "
+    NFSMW_TRAZA("[traza] dibujo VS n{} PS n{} tipo {} cuenta {} sup {:08X} rt0 {:08X} rt1 {:08X} "
                 "mascara {:08X} mezcla {:08X} colorctl {:08X} prof {:08X} stencil {:08X} "
                 "modo {:08X}{}",
                 vs_dibujo_ ? int(vs_dibujo_->numero) : -1, ps_dibujo_ ? int(ps_dibujo_->numero) : -1,
@@ -2459,6 +2520,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
                 Registro(g::XE_GPU_REG_RB_COLORCONTROL), Registro(g::XE_GPU_REG_RB_DEPTHCONTROL),
                 Registro(g::XE_GPU_REG_RB_STENCILREFMASK), Registro(g::XE_GPU_REG_RB_MODECONTROL),
                 texturas);
+    if (nfsmw::diag::Activo()) {
+      TrazarConstantes();
+    }
     TrazarVertices(iniciador);
   }
 
@@ -2467,7 +2531,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   // textures, as they are in guest memory.
   void TrazarVertices(uint32_t iniciador) {
     namespace g = rex::graphics;
-    if (!vs_dibujo_ || !ps_dibujo_ || trazas_ >= 4000 ||
+    if (!vs_dibujo_ || !ps_dibujo_ || trazas_ >= nfsmw::diag::TrazaMax() ||
         vs_microcodigo_.size() != vs_dibujo_->microcodigo.size()) {
       return;
     }
@@ -2609,7 +2673,7 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
                              std::bit_cast<float>(Registro(b + 1)), std::bit_cast<float>(Registro(b + 2)),
                              std::bit_cast<float>(Registro(b + 3)));
     }
-    REXLOG_INFO("[traza] vertices PS n{} VS n{}:{}", ps_dibujo_->numero, vs_dibujo_->numero,
+    NFSMW_TRAZA("[traza] vertices PS n{} VS n{}:{}", ps_dibujo_->numero, vs_dibujo_->numero,
                 detalle);
   }
 
@@ -2625,11 +2689,11 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   }
 
   void TrazarCopia(const RegistrosCopia& r) {
-    if (!trazando_ || trazas_ >= 4000) {
+    if (!trazando_ || trazas_ >= nfsmw::diag::TrazaMax()) {
       return;
     }
     ++trazas_;
-    REXLOG_INFO("[traza] copia control {:08X} destino {:08X} info {:08X} pitch {:08X} sup {:08X} "
+    NFSMW_TRAZA("[traza] copia control {:08X} destino {:08X} info {:08X} pitch {:08X} sup {:08X} "
                 "rt0 {:08X} prof {:08X} borrado {:08X}/{:08X} prof_borrado {:08X}",
                 r.rb_copy_control, r.rb_copy_dest_base, r.rb_copy_dest_info, r.rb_copy_dest_pitch,
                 r.rb_surface_info, r.rb_color_info[0], r.rb_depth_info, r.rb_color_clear,
@@ -2767,9 +2831,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
     }
     carga->uso = ++cargas_tic_;
     (tipo == 0 ? vs_actual_ : ps_actual_) = carga->entrada;
-    if (trazando_ && trazas_ < 4000) {
+    if (trazando_ && trazas_ < nfsmw::diag::TrazaMax()) {
       ++trazas_;
-      REXLOG_INFO("[traza] IM_LOAD {} n{} ({} palabras, huella {:016X})", tipo == 0 ? "VS" : "PS",
+      NFSMW_TRAZA("[traza] IM_LOAD {} n{} ({} palabras, huella {:016X})", tipo == 0 ? "VS" : "PS",
                   carga->entrada ? int(carga->entrada->numero) : -1, carga->host.size(), carga->huella);
     }
     if (tipo == 0) {
@@ -2851,9 +2915,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
     const EntradaShader* entrada =
         shaders_.cargada() ? shaders_.Identificar(tipo == 0, microcodigo_) : nullptr;
     (tipo == 0 ? vs_actual_ : ps_actual_) = entrada;
-    if (trazando_ && trazas_ < 4000) {
+    if (trazando_ && trazas_ < nfsmw::diag::TrazaMax()) {
       ++trazas_;
-      REXLOG_INFO("[traza] IM_LOAD {} n{} ({} palabras, huella {:016X})", tipo == 0 ? "VS" : "PS",
+      NFSMW_TRAZA("[traza] IM_LOAD {} n{} ({} palabras, huella {:016X})", tipo == 0 ? "VS" : "PS",
                   entrada ? int(entrada->numero) : -1, microcodigo_.size(),
                   XXH3_64bits(microcodigo_.data(), microcodigo_.size() * sizeof(uint32_t)));
     }
@@ -2939,9 +3003,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
       UsarInmediato(tipo, *via);
       ++inm_i_aciertos_;
       ++cargas_cacheadas_;
-      if (trazando_ && trazas_ < 4000) {
+      if (trazando_ && trazas_ < nfsmw::diag::TrazaMax()) {
         ++trazas_;
-        REXLOG_INFO("[traza] IM_LOAD {} n{} ({} palabras, huella {:016X}; IM_LOAD_IMMEDIATE de la cache)",
+        NFSMW_TRAZA("[traza] IM_LOAD {} n{} ({} palabras, huella {:016X}; IM_LOAD_IMMEDIATE de la cache)",
                     tipo == 0 ? "VS" : "PS", via->entrada ? int(via->entrada->numero) : -1, via->host.size(),
                     via->huella);
       }
@@ -4872,6 +4936,9 @@ class SistemaGraficoNativo final : public rex::system::IGraphicsSystem {
   // Trace of one frame (nfsmw_nativo_diag_fotograma_s).
   Reloj::time_point inicio_sistema_{};
   bool trazando_ = false;
+  static constexpr uint64_t kTrazaCada = 20;  // wide diagnostic mode: one traced frame every this many Swaps
+  uint32_t constantes_traza_[512][4] = {};
+  bool constantes_traza_validas_ = false;
   bool traza_hecha_ = false;
   // nfsmw_nativo_diag_constantes_ps is not empty. Refreshed on every Swap.
   bool diag_constantes_activo_ = false;

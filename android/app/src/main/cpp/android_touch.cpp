@@ -1,7 +1,11 @@
 #include <jni.h>
 
+#include <string>
+
 #include <rex/cvar.h>
 #include <rex/input/sdl/sdl_input_driver.h>
+
+#include "../../../../../app/src/nfsmw_diagnostico.h"
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_nfsmw_android_TouchControlsView_nativeSetTouchState(JNIEnv*, jclass, jint buttons, jint left_x,
@@ -24,4 +28,16 @@ Java_com_nfsmw_android_GameActivity_nativeSetStretch(JNIEnv*, jclass, jboolean s
     rex::cvar::SetFlagByName("present_safe_area_x", "100");
     rex::cvar::SetFlagByName("present_safe_area_y", "100");
   }
+}
+
+// Wide diagnostic mode (the DIAG button of the pad): while it is on, the renderer's frame trace runs every few
+// frames and goes to a file in `dir` (see app/src/nfsmw_diagnostico.h).
+extern "C" JNIEXPORT void JNICALL
+Java_com_nfsmw_android_TouchControlsView_nativeSetDiagnostic(JNIEnv* env, jclass, jboolean on, jstring dir) {
+  const char* chars = env->GetStringUTFChars(dir, nullptr);
+  const std::string folder = chars ? chars : "";
+  if (chars) {
+    env->ReleaseStringUTFChars(dir, chars);
+  }
+  nfsmw::diag::Establecer(on, folder);
 }

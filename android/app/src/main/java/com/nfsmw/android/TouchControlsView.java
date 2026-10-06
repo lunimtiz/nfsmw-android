@@ -2,6 +2,7 @@ package com.nfsmw.android;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Environment;
 import android.graphics.Canvas;
 import android.graphics.DashPathEffect;
 import android.graphics.Paint;
@@ -10,10 +11,12 @@ import android.graphics.Typeface;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
+import android.widget.Toast;
 
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -31,9 +34,12 @@ public final class TouchControlsView extends View {
     static final int START = 0x0010, BACK = 0x0020, LTHUMB = 0x0040, RTHUMB = 0x0080;
     static final int LB = 0x0100, RB = 0x0200, A = 0x1000, B = 0x2000, X = 0x4000, Y = 0x8000;
 
-    private static final int BUTTON = 0, STICK = 1, DPAD = 2, PEDAL = 3, MENU = 4;
+    private static final int BUTTON = 0, STICK = 1, DPAD = 2, PEDAL = 3, MENU = 4, DIAG = 5;
     private static final int TRIGGER_NONE = 0, TRIGGER_LEFT = 1, TRIGGER_RIGHT = 2;
     private static final String PREFS = "nfsmw_controls";
+
+    /** Wide diagnostic mode: the renderer writes its frame trace to a file in dir while it is on. */
+    static native void nativeSetDiagnostic(boolean on, String dir);
 
     static native void nativeSetTouchState(int buttons, int leftX, int leftY, int rightX, int rightY,
                                            int leftTrigger, int rightTrigger);
@@ -107,6 +113,7 @@ public final class TouchControlsView extends View {
 
     // State.
     private boolean editing;
+    private boolean diagActive;
     private boolean hiddenByGamepad;
     private Control selected;
     private float dragDX, dragDY;
@@ -151,6 +158,8 @@ public final class TouchControlsView extends View {
         // Middle: Back, Start and the editor.
         add(new Control("back", BUTTON, "BACK", "", BACK, TRIGGER_NONE, grey, .37f, .08f, .10f, true));
         add(new Control("menu", MENU, "⚙", "", 0, TRIGGER_NONE, grey, .50f, .08f, .09f, true));
+        // Toggles the wide diagnostic log (a file in the game folder); red while it is recording.
+        add(new Control("diag", DIAG, "DIAG", "", 0, TRIGGER_NONE, grey, .50f, .22f, .09f, true));
         add(new Control("start", BUTTON, "START", "", START, TRIGGER_NONE, grey, .63f, .08f, .10f, true));
         // Off by default: the camera stick and the stick clicks.
         add(new Control("rs", STICK, "", "CAMARA", 0, TRIGGER_NONE, grey, .55f, .72f, .30f, false));
@@ -363,6 +372,12 @@ public final class TouchControlsView extends View {
                 c.pressed = true;
             }
         }
+        // The DIAG button toggles the wide diagnostic log when the finger lifts on it.
+        if (liftedIndex >= 0 && hitAny(event.getX(liftedIndex), event.getY(liftedIndex)) == diagControl()) {
+            releaseAll();
+            toggleDiagnostic();
+            return true;
+        }
         // The gear opens the editor when the finger lifts on it.
         if (liftedIndex >= 0 && hitAny(event.getX(liftedIndex), event.getY(liftedIndex)) == menuControl()) {
             releaseAll();
@@ -422,6 +437,28 @@ public final class TouchControlsView extends View {
             }
         }
         return false;
+    }
+
+    private Control diagControl() {
+        for (Control c : controls) {
+            if (c.type == DIAG) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /** Starts or stops the wide diagnostic log: a file in the game folder's diag/ folder. */
+    private void toggleDiagnostic() {
+        diagActive = !diagActive;
+        File dir = new File(Environment.getExternalStorageDirectory(), MainActivity.GAME_FOLDER_NAME + "/diag");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        nativeSetDiagnostic(diagActive, dir.getAbsolutePath());
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+        Toast.makeText(getContext(), diagActive ? "Diagnóstico ACTIVADO" : "Diagnóstico apagado",
+                Toast.LENGTH_SHORT).show();
+        invalidate();
     }
 
     private Control menuControl() {
@@ -653,7 +690,7 @@ public final class TouchControlsView extends View {
             default: {
                 fill.setColor(withAlpha(0xFF000000, a * 80 / 255));
                 canvas.drawCircle(cx, cy + r * .06f, r * 1.02f, fill);
-                fill.setColor(withAlpha(c.pressed ? 0xFFFF9A32 : 0xFF18232E, a * 190 / 255));
+                fill.setColor(withAlpha(c.type == DIAG && diagActive ? 0xFFC62828 : c.pressed ? 0xFFFF9A32 : 0xFF18232E, a * 190 / 255));
                 canvas.drawCircle(cx, cy, r, fill);
                 stroke.setStrokeWidth(Math.max(2.5f, r * .08f));
                 stroke.setColor(withAlpha(c.pressed ? 0xFFFFD18A : c.color == 0xFF2A3440 ? 0xFFEAF2FA : c.color,

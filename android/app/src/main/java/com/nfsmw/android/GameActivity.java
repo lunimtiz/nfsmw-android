@@ -36,10 +36,12 @@ import android.widget.TextView;
 
 import org.libsdl.app.SDLActivity;
 
+import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -182,6 +184,21 @@ public final class GameActivity extends SDLActivity
         args.add("--cache_root=" + cacheRoot);
         // The launcher's graphics options win over nfsmw.toml.
         args.addAll(GameOptions.arguments(this));
+        // Experiments without rebuilding: one "cvar=value" per line in <game folder>/diag/args.txt ('#' = comment).
+        File extra = new File(gameRoot, "diag/args.txt");
+        if (extra.isFile()) {
+            try (BufferedReader reader = new BufferedReader(new FileReader(extra))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    line = line.trim();
+                    if (!line.isEmpty() && !line.startsWith("#")) {
+                        args.add(line.startsWith("--") ? line : "--" + line);
+                    }
+                }
+            } catch (IOException e) {
+                Log.w(TAG, "diag/args.txt", e);
+            }
+        }
         if (getSharedPreferences("nfsmw_controls", MODE_PRIVATE).getBoolean("stretch", true)) {
             args.add("--present_letterbox=false");
             args.add("--present_safe_area_x=100");

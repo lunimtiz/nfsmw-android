@@ -63,6 +63,7 @@ set(NFSMW_SOURCES
     # Native renderer, part C1: the app's own graphics system (cvar
     # nfsmw_renderizador, "xenos" by default). See docs/native-renderer.md.
     src/nfsmw_nativo_sistema.cpp
+    src/nfsmw_diagnostico.cpp
     # The game's D3D waits without spinning: sleeps until the PM4 ring thread advances
     # (cvar nfsmw_espera_anillo_bloqueante).
     src/nfsmw_espera_anillo.cpp
