@@ -67,6 +67,13 @@ REXCVAR_DEFINE_STRING(nfsmw_consultas_oclusion, "auto", "NFSMW",
 REXCVAR_DEFINE_BOOL(nfsmw_nativo_sincronizacion_gpu, true, "NFSMW",
                     "Sincroniza subidas, reflejos y lecturas de imagenes entre pases Vulkan")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(nfsmw_nativo_sincronizacion_total, -1, "NFSMW",
+                     "Dependencias de Vulkan lo mas anchas posible (todas las etapas y accesos) y una barrera "
+                     "completa tras cada copia, limpieza, blit o lectura de imagenes. -1 = automatico (activo en "
+                     "GPUs Arm/Mali, donde sin ello los reflejos del coche y el retrovisor solo tenian imagen en el "
+                     "5 % de los fotogramas); 0 = apagado; 1 = encendido. Requiere reiniciar el juego")
+    .range(-1, 1)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
 REXCVAR_DEFINE_INT32(nfsmw_nativo_resolver_sin_copia_alternar_s, 0, "NFSMW",
                      "Renderizador nativo (prueba, build 154): con N > 0 alterna copiar e intercambiar cada N "
@@ -919,6 +926,12 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
   }
 
   bool Inicializar() {
+    {
+      VkPhysicalDeviceProperties fisico_sync{};
+      dispositivo_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(dispositivo_->physical_device(),
+                                                                                  &fisico_sync);
+      nfsmw::nativo::ConfigurarSincronizacionTotal(fisico_sync.vendorID);
+    }
     REXLOG_INFO("[nativo] sincronizacion de imagenes Vulkan = {} ({})",
                 REXCVAR_GET(nfsmw_nativo_sincronizacion_gpu) ? "SI" : "no",
                 dispositivo_->properties().deviceName);
@@ -936,6 +949,21 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     blit_ = reinterpret_cast<FnBlit>(
         dispositivo_->vulkan_instance()->functions().vkGetDeviceProcAddr(device_,
                                                                           "vkCmdBlitImage"));
+    if (nfsmw::nativo::SincronizacionTotal()) {
+      // Every copy, depth clear and blit is followed by a full barrier.
+      nfsmw::nativo::g_barrera_fn = dfn_.vkCmdPipelineBarrier;
+      nfsmw::nativo::g_copiar_real = copiar_imagen_;
+      copiar_imagen_ = &nfsmw::nativo::CopiarYBarrera;
+      if (borrar_profundidad_) {
+        nfsmw::nativo::g_borrar_prof_real = borrar_profundidad_;
+        borrar_profundidad_ = &nfsmw::nativo::BorrarProfundidadYBarrera;
+      }
+      if (blit_) {
+        nfsmw::nativo::g_blit_real = blit_;
+        blit_ = &nfsmw::nativo::BlitYBarrera;
+      }
+      REXLOG_INFO("[nativo] sincronizacion total activa: barreras completas tras cada transferencia");
+    }
     // Attachment, copy and clear source and destination, and sampling of the resolved ones (shadows).
     const VkFormatFeatureFlags kUsosProfundidad =
         VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
@@ -1632,7 +1660,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
         // nfsmw_nativo_borrar_area_util. Only the rows in use; the bottom band, if needed.
         if (!BorrarColorAreaUtil(*destino_render, color)) {
           dfn_.vkCmdClearColorImage(comandos_trabajo_, destino_render->imagen,
-                                    VK_IMAGE_LAYOUT_GENERAL, &color, 1, &kRangoColor);
+                                    VK_IMAGE_LAYOUT_GENERAL, &color, 1, &kRangoColor); nfsmw::nativo::BarreraTotal(dfn_.vkCmdPipelineBarrier, comandos_trabajo_);
           QuitarBanda(*destino_render);
         }
         ++borrados_;
@@ -2857,8 +2885,14 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
         VkMemoryBarrier barrera{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrera.srcAccessMask = kAccesosImagenes;
         barrera.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        dfn_.vkCmdPipelineBarrier(comandos_subida_, kEtapasImagenes,
-                                  VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrera,
+        VkPipelineStageFlags etapas_origen = kEtapasImagenes;
+        VkPipelineStageFlags etapas_destino = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        if (nfsmw::nativo::SincronizacionTotal()) {
+          barrera.srcAccessMask = nfsmw::nativo::kAccesosTodos;
+          barrera.dstAccessMask = nfsmw::nativo::kAccesosTodos;
+          etapas_origen = etapas_destino = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+        dfn_.vkCmdPipelineBarrier(comandos_subida_, etapas_origen, etapas_destino, 0, 1, &barrera,
                                   0, nullptr, 0, nullptr);
       }
     }
@@ -4781,7 +4815,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     } else {
       const VkClearColorValue cero{};
       dfn_.vkCmdClearColorImage(comandos, imagen.imagen, VK_IMAGE_LAYOUT_GENERAL, &cero,
-                                1, &kRangoColor);
+                                1, &kRangoColor); nfsmw::nativo::BarreraTotal(dfn_.vkCmdPipelineBarrier, comandos);
     }
     imagen.preparada = true;
     if (dibujos_) {
@@ -5143,8 +5177,15 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
           VkMemoryBarrier barrera{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
           barrera.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
           barrera.dstAccessMask = kAccesosImagenes;
-          dfn_.vkCmdPipelineBarrier(comandos_subida_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                    kEtapasImagenes, 0, 1, &barrera, 0, nullptr, 0, nullptr);
+          VkPipelineStageFlags etapas_origen = VK_PIPELINE_STAGE_TRANSFER_BIT;
+          VkPipelineStageFlags etapas_destino = kEtapasImagenes;
+          if (nfsmw::nativo::SincronizacionTotal()) {
+            barrera.srcAccessMask = nfsmw::nativo::kAccesosTodos;
+            barrera.dstAccessMask = nfsmw::nativo::kAccesosTodos;
+            etapas_origen = etapas_destino = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+          }
+          dfn_.vkCmdPipelineBarrier(comandos_subida_, etapas_origen, etapas_destino, 0, 1, &barrera, 0, nullptr,
+                                    0, nullptr);
         }
         if (dfn_.vkEndCommandBuffer(comandos_subida_) != VK_SUCCESS) {
           return false;
@@ -5235,7 +5276,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     Preparar(mosaico_);
     const VkClearColorValue fondo{{0.12f, 0.0f, 0.12f, 1.0f}};
     dfn_.vkCmdClearColorImage(comandos_trabajo_, mosaico_.imagen, VK_IMAGE_LAYOUT_GENERAL, &fondo,
-                              1, &kRangoColor);
+                              1, &kRangoColor); nfsmw::nativo::BarreraTotal(dfn_.vkCmdPipelineBarrier, comandos_trabajo_);
     std::string lista;
     for (size_t i = 0; i < bases.size() && i < 16; ++i) {
       const auto it = resueltas_.find(bases[i]);
@@ -5487,7 +5528,7 @@ class DestinosVulkan final : public DestinosNativos, public ContextoDestinos {
     copia.imageOffset = {int32_t(dx), int32_t(dy), 0};
     copia.imageExtent = {ancho, alto, 1};
     dfn_.vkCmdCopyImageToBuffer(comandos_trabajo_, resuelta.imagen.imagen, VK_IMAGE_LAYOUT_GENERAL,
-                                lectura.bufer, 1, &copia);
+                                lectura.bufer, 1, &copia); nfsmw::nativo::BarreraTotal(dfn_.vkCmdPipelineBarrier, comandos_trabajo_);
     lecturas_pendientes_.push_back({&lectura, reg.rb_copy_dest_base, x0, y0, ancho, alto,
                                     reg.rb_copy_dest_pitch & 0x3FFF,
                                     (reg.rb_copy_dest_pitch >> 16) & 0x3FFF, reg.rb_copy_dest_info});

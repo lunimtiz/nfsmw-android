@@ -2216,6 +2216,17 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       direccion_bufer_ = reinterpret_cast<FnDireccionBufer>(pedir(device_, "vkGetBufferDeviceAddressKHR"));
     }
     copiar_imagen_ = reinterpret_cast<FnCopiarImagen>(pedir(device_, "vkCmdCopyImage"));
+    {
+      VkPhysicalDeviceProperties fisico_sync{};
+      dispositivo_->vulkan_instance()->functions().vkGetPhysicalDeviceProperties(dispositivo_->physical_device(),
+                                                                                  &fisico_sync);
+      nfsmw::nativo::ConfigurarSincronizacionTotal(fisico_sync.vendorID);
+    }
+    if (nfsmw::nativo::SincronizacionTotal() && copiar_imagen_) {  // see nfsmw_nativo_sincronizacion.h
+      nfsmw::nativo::g_barrera_fn = dfn_.vkCmdPipelineBarrier;
+      nfsmw::nativo::g_copiar_real = copiar_imagen_;
+      copiar_imagen_ = &nfsmw::nativo::CopiarYBarrera;
+    }
     CargarCachePipelines();
     CargarEstadoDinamico();  // dynamic state phases 1 and 2
     if (!direccion_bufer_) {
@@ -8231,7 +8242,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
       }
       const VkImageSubresourceRange rango{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, capas};
       dfn_.vkCmdClearColorImage(subida, vacias_[i].imagen, VK_IMAGE_LAYOUT_GENERAL, &cero, 1,
-                                &rango);
+                                &rango); nfsmw::nativo::BarreraTotal(dfn_.vkCmdPipelineBarrier, subida);
       vacias_[i].preparada = true;
     }
     vacias_preparadas_ = true;
@@ -9799,7 +9810,7 @@ class DibujosVulkanImpl final : public DibujosVulkan {
                            textura.fondo ? textura.fondo : 1};
     }
     dfn_.vkCmdCopyBufferToImage(subida, subida_, textura.imagen.imagen, VK_IMAGE_LAYOUT_GENERAL,
-                                textura.niveles, copias.data());
+                                textura.niveles, copias.data()); nfsmw::nativo::BarreraTotal(dfn_.vkCmdPipelineBarrier, subida);
   }
 
   // A texture's view, the same for RanuraVista and for the deferred views of RecogerEnlaces.
